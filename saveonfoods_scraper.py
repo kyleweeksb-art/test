@@ -523,21 +523,43 @@ def scrape_category(driver, category_name, category_url, store_name):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def get_chrome_major_version():
+    """Detect the installed Chrome major version number."""
+    try:
+        import subprocess as _sp
+        output = _sp.check_output(["google-chrome", "--version"], text=True).strip()
+        m = re.search(r"(\d+)\.", output)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
 def main():
     #print(driver.capabilities['browserVersion'])
     # Create the table once before any scraping starts.
     # If the table already exists this does nothing — it never overwrites data.
     setup_database()
 
-    # undetected_chromedriver bypasses Cloudflare bot detection.
-    # Do NOT use headless — it gets detected and blocked.
-    # Update version_main if your Chrome version changes (check chrome://version).
+    chrome_version = get_chrome_major_version()
     options = uc.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    driver  = uc.Chrome(options=options, version_main=146)
+    # Give this scraper its own chromedriver copy to avoid conflicts
+    import shutil, tempfile
+    system_chromedriver = shutil.which("chromedriver")
+    driver_path = None
+    if system_chromedriver:
+        tmp_dir = tempfile.mkdtemp(prefix="uc_saveon_")
+        driver_path = os.path.join(tmp_dir, "chromedriver")
+        shutil.copy2(system_chromedriver, driver_path)
+        os.chmod(driver_path, 0o755)
+    if driver_path:
+        driver = uc.Chrome(options=options, version_main=chrome_version,
+                           driver_executable_path=driver_path)
+    else:
+        driver = uc.Chrome(options=options, version_main=chrome_version)
 
     try:
         for loc_index, (store_name, store_id) in enumerate(LOCATIONS, 1):
