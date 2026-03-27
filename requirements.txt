@@ -1,0 +1,11 @@
+# Core scraping
+selenium>=4.20
+beautifulsoup4>=4.12
+lxml
+
+# MySQL
+mysql-connector-python>=8.3
+
+# Azure Entra ID authentication
+azure-identity>=1.17
+undetected-chromedriver>=3.5
