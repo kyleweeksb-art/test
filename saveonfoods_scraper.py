@@ -550,12 +550,18 @@ def main():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    # Use system chromedriver if available to skip the patcher download
-    import shutil
+    # Give this scraper its own chromedriver copy to avoid conflicts
+    import shutil, tempfile
     system_chromedriver = shutil.which("chromedriver")
+    driver_path = None
     if system_chromedriver:
+        tmp_dir = tempfile.mkdtemp(prefix="uc_saveon_")
+        driver_path = os.path.join(tmp_dir, "chromedriver")
+        shutil.copy2(system_chromedriver, driver_path)
+        os.chmod(driver_path, 0o755)
+    if driver_path:
         driver = uc.Chrome(options=options, version_main=chrome_version,
-                           driver_executable_path=system_chromedriver)
+                           driver_executable_path=driver_path)
     else:
         driver = uc.Chrome(options=options, version_main=chrome_version)
 
