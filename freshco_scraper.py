@@ -14,6 +14,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+
+
 # ── Store locations (name, postal code) ───────────────────────────────────────
 LOCATIONS = [
     ("Evanston",   "T3P0M9"),
@@ -66,6 +68,26 @@ def or_none(value):
     if value == "" or value is None:
         return None
     return value
+
+
+def strip_unit_prices(text):
+    """Remove unit prices, earn/save text, and other non-shelf-price dollar amounts."""
+    text = re.sub(
+        r"\(\s*\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)\s*\)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s*/\s*[\d.]*\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:earn|save|bonus|reward|scene\+?|redeem|off)[^$]*\$[\d.]+",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:approx\.?|approximately)\s+\$[\d.]+\s*/\s*(?:kg|lb|lbs)",
+        "", text, flags=re.IGNORECASE)
+    return text
 
 
 def setup_database():
@@ -374,23 +396,18 @@ def parse_products(html, category_name, store_name):
         if not name or len(name) < 2:
             continue
 
-        # Strip parenthesised per-unit price expressions like "($47.03 per 100g)"
-        # before scanning for dollar amounts — FreshCo displays these inline on
-        # the card and they are NOT the shelf price.
-        container_text = re.sub(
-            r"\(\s*\$[\d.]+\s+per\s+\d+\s*(?:g|ml|kg|l|oz|lb)\s*\)",
-            "", container.get_text(), flags=re.IGNORECASE
-        )
-        MIN_PLAUSIBLE_PRICE = 0.25
-        MAX_PLAUSIBLE_PRICE = 150.0
+        # Strip ALL unit-price and non-shelf-price dollar amounts before scanning.
+        container_text = strip_unit_prices(container.get_text())
+        MIN_PLAUSIBLE_PRICE = 0.50
+        MAX_PLAUSIBLE_PRICE = 200.0
         raw_prices = re.findall(r"\$(\d+\.\d{2})", container_text)
         plausible = [float(p) for p in raw_prices if MIN_PLAUSIBLE_PRICE <= float(p) <= MAX_PLAUSIBLE_PRICE]
         if plausible:
-            # Take the smallest remaining value — on sale cards the crossed-out
-            # was-price is larger than the now-price so min() gives the real price.
-            price = min(plausible)
+            # Take the FIRST plausible price — sites render the current/sale price
+            # before the was-price in the DOM, so first is the shelf price.
+            price = plausible[0]
         elif raw_prices:
-            price = min(float(p) for p in raw_prices)
+            price = float(raw_prices[0])
         else:
             price = None
 

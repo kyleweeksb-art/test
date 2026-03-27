@@ -1,9 +1,7 @@
 import re
-import os
 import time
 import uuid
 import hashlib
-import subprocess
 import mysql.connector
 from db_connection import get_db_connection
 from mysql.connector import Error
@@ -13,6 +11,8 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+
 
 # ── Store locations (name, postal_code) ───────────────────────────────────────
 LOCATIONS = [
@@ -333,6 +333,26 @@ def or_none(value):
     return value
 
 
+def strip_unit_prices(text):
+    """Remove unit prices, earn/save text, and other non-shelf-price dollar amounts."""
+    text = re.sub(
+        r"\(\s*\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)\s*\)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s*/\s*[\d.]*\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:earn|save|bonus|reward|scene\+?|redeem|off)[^$]*\$[\d.]+",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:approx\.?|approximately)\s+\$[\d.]+\s*/\s*(?:kg|lb|lbs)",
+        "", text, flags=re.IGNORECASE)
+    return text
+
+
 def setup_database():
     """Connect to the database and create the products table if it doesn't
     exist yet. Called once at the start of main() before scraping begins."""
@@ -523,29 +543,20 @@ def extract_price(text):
     """
     Pull a dollar price from text like '$2.25', 'about $0.92', 'about $3.82'.
     Ignores the 'about' prefix used on by-weight items.
+    Returns None if the text looks like a unit price (e.g. $0.54/100g).
     """
+    # Reject if the text looks like a unit price
+    if re.search(r'/\s*[\d.]*\s*(?:kg|g|lb|lbs|ml|l|oz|ea|each|unit|ct)\b|per\s+\d', text, re.I):
+        return None
     text = re.sub(r"about\s*", "", text, flags=re.IGNORECASE).strip()
-    m = re.search(r"\$\s*(\d+\.?\d*)", text)
+    m = re.search(r"\$\s*(\d+\.\d{2})", text)
     if m:
         try:
-            return float(m.group(1))
+            val = float(m.group(1))
+            return val if val >= 0.50 else None
         except ValueError:
             pass
     return None
-
-
-
-def safe_str(tag):
-    """Convert a BS4 tag to string safely across BS4 versions."""
-    if tag is None:
-        return ""
-    try:
-        return str(tag)
-    except (TypeError, AttributeError):
-        try:
-            return tag.decode()
-        except Exception:
-            return tag.get_text() if hasattr(tag, 'get_text') else ""
 
 
 # ── Browser helpers ────────────────────────────────────────────────────────────
@@ -838,7 +849,7 @@ def parse_products(html, image_map, category_name, store_name, postal_code):
     Uses a pre-collected image_map {product_code: url} from the live JS DOM.
     Names are cleaned via clean_name() to separate brand from product name.
     """
-    soup  = BeautifulSoup(html, "lxml")
+    soup  = BeautifulSoup(html, "html.parser")
     links = soup.find_all("a", href=re.compile(r"/p/\d+", re.I))
 
     products = []
@@ -910,32 +921,31 @@ def parse_products(html, image_map, category_name, store_name, postal_code):
             if price_el:
                 price = extract_price(price_el.get_text(strip=True))
         if price is None:
-            amounts = re.findall(r"(?:about\s*)?\$\s*(\d+\.\d{2})", card_text, re.IGNORECASE)
-            if amounts:
+            cleaned_card_text = strip_unit_prices(card_text)
+            amounts = re.findall(r"(?:about\s*)?\$\s*(\d+\.\d{2})", cleaned_card_text, re.IGNORECASE)
+            plausible = [float(a) for a in amounts if 0.50 <= float(a) <= 500.0]
+            if plausible:
                 try:
-                    price = float(amounts[0])
-                except ValueError:
+                    price = plausible[0]
+                except (ValueError, IndexError):
                     pass
 
         # ── Sanity-check price — filter out unit-price/points phantom values ───
-        MAX_PLAUSIBLE_PRICE = 500.0
-        if price is not None and price > MAX_PLAUSIBLE_PRICE:
+        if price is not None and (price > 500.0 or price < 0.50):
             price = None
 
         # ── Stock status ───────────────────────────────────────────────────────
-        card_html = safe_str(card)
+        card_html = str(card)
         in_stock = not bool(re.search(
             r'out.of.stock|unavailable|not available|sold.out|'
             r'class="[^"]*out-of-stock|class="[^"]*unavailable',
             card_html, re.IGNORECASE
         ))
+        # Also treat "Add to Cart" button being disabled as out of stock
         if in_stock:
-            try:
-                add_btn = card.find(attrs={"aria-label": re.compile(r"add.*cart", re.I)})
-                if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
-                    in_stock = False
-            except (AttributeError, TypeError):
-                pass
+            add_btn = card.find(attrs={"aria-label": re.compile(r"add.*cart", re.I)})
+            if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
+                in_stock = False
 
         # ── Site unit price string ─────────────────────────────────────────────
         site_unit_price = ""
@@ -1025,42 +1035,16 @@ def scrape_category(driver, category_name, category_url, store_name, postal_code
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def get_chrome_major_version():
-    """Detect the installed Chrome major version number."""
-    try:
-        output = subprocess.check_output(
-            ["google-chrome", "--version"], text=True
-        ).strip()
-        m = re.search(r"(\d+)\.", output)
-        return int(m.group(1)) if m else None
-    except Exception:
-        return None
-
-
 def main():
     setup_database()
 
-    chrome_version = get_chrome_major_version()
     options = uc.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,900")
-    # Give this scraper its own chromedriver copy to avoid conflicts
-    import shutil, tempfile
-    system_chromedriver = shutil.which("chromedriver")
-    driver_path = None
-    if system_chromedriver:
-        tmp_dir = tempfile.mkdtemp(prefix="uc_superstore_")
-        driver_path = os.path.join(tmp_dir, "chromedriver")
-        shutil.copy2(system_chromedriver, driver_path)
-        os.chmod(driver_path, 0o755)
-    if driver_path:
-        driver = uc.Chrome(options=options, version_main=chrome_version,
-                           driver_executable_path=driver_path)
-    else:
-        driver = uc.Chrome(options=options, version_main=chrome_version)
+    driver = uc.Chrome(options=options, version_main=146)
 
     try:
         for loc_index, (store_name, postal_code) in enumerate(LOCATIONS, 1):

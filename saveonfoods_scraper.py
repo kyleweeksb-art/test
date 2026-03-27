@@ -3,7 +3,6 @@ import re
 import time
 import uuid
 import hashlib
-import subprocess
 import mysql.connector
 from db_connection import get_db_connection
 from mysql.connector import Error
@@ -13,6 +12,8 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+
 
 # ── Store locations (name, rsid) ──────────────────────────────────────────────
 # Save-On-Foods uses a store rsid in the URL rather than postal codes
@@ -125,17 +126,24 @@ def or_none(value):
     return value
 
 
-def safe_str(tag):
-    """Convert a BS4 tag to string safely across BS4 versions."""
-    if tag is None:
-        return ""
-    try:
-        return str(tag)
-    except (TypeError, AttributeError):
-        try:
-            return tag.decode()
-        except Exception:
-            return tag.get_text() if hasattr(tag, 'get_text') else ""
+def strip_unit_prices(text):
+    """Remove unit prices, earn/save text, and other non-shelf-price dollar amounts."""
+    text = re.sub(
+        r"\(\s*\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)\s*\)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s*/\s*[\d.]*\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:earn|save|bonus|reward|scene\+?|redeem|off)[^$]*\$[\d.]+",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:approx\.?|approximately)\s+\$[\d.]+\s*/\s*(?:kg|lb|lbs)",
+        "", text, flags=re.IGNORECASE)
+    return text
 
 
 def setup_database():
@@ -362,7 +370,7 @@ def wait_for_cards(driver, timeout=20):
 # ── Scraping logic ─────────────────────────────────────────────────────────────
 
 def parse_products(html, category_name, store_name):
-    soup  = BeautifulSoup(html, "lxml")
+    soup  = BeautifulSoup(html, "html.parser")
     cards = soup.find_all("article", attrs={"data-testid": re.compile(r"^ProductCardWrapper-")})
     products = []
 
@@ -403,31 +411,26 @@ def parse_products(html, category_name, store_name):
             # MAX cap filters out points/reward phantom values (e.g. $767, $1603).
             # max() gives the shelf price since unit prices are always smaller.
             if price is None:
-                # Strip parenthesised per-unit price expressions like "($47.03 per 100g)"
-                # before scanning for dollar amounts — these are NOT the shelf price.
-                pricing_text = re.sub(
-                    r"\(\s*\$[\d.]+\s+per\s+\d+\s*(?:g|ml|kg|l|oz|lb)\s*\)",
-                    "", pricing_div.get_text(), flags=re.IGNORECASE
-                )
-                MIN_PLAUSIBLE_PRICE = 0.25
-                MAX_PLAUSIBLE_PRICE = 150.0
-                raw_prices = re.findall(r"\$\s*(\d+\.?\d*)", pricing_text)
+                # Strip ALL unit-price and non-shelf-price dollar amounts.
+                pricing_text = strip_unit_prices(pricing_div.get_text())
+                MIN_PLAUSIBLE_PRICE = 0.50
+                MAX_PLAUSIBLE_PRICE = 200.0
+                raw_prices = re.findall(r"\$\s*(\d+\.\d{2})", pricing_text)
                 plausible = [float(p) for p in raw_prices if MIN_PLAUSIBLE_PRICE <= float(p) <= MAX_PLAUSIBLE_PRICE]
                 if plausible:
                     try:
-                        # Take the smallest remaining value — on sale cards the crossed-out
-                        # was-price is larger than the now-price so min() gives the real price.
-                        price = min(plausible)
+                        # Take the FIRST plausible price — sale price renders first.
+                        price = plausible[0]
                     except (ValueError, IndexError):
                         pass
                 elif raw_prices:
                     try:
-                        price = min(float(p) for p in raw_prices)
+                        price = float(raw_prices[0])
                     except ValueError:
                         pass
 
         # ── Stock status ───────────────────────────────────────────────────────
-        card_html = safe_str(card)
+        card_html = str(card)
         in_stock = not bool(re.search(
             r'out.of.stock|unavailable|not available|sold.out|'
             r'OutOfStock|SoldOut|'
@@ -436,12 +439,9 @@ def parse_products(html, category_name, store_name):
         ))
         if in_stock:
             # Save-On-Foods uses a specific testid for the add-to-cart button
-            try:
-                add_btn = card.find(attrs={"data-testid": re.compile(r"addToCart|add-to-cart", re.I)})
-                if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
-                    in_stock = False
-            except (AttributeError, TypeError):
-                pass
+            add_btn = card.find(attrs={"data-testid": re.compile(r"addToCart|add-to-cart", re.I)})
+            if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
+                in_stock = False
 
         # Search the image wrapper first; fall back to the whole card.
         # Sale cards inject badge elements that can shift the wrapper's DOM.
@@ -523,18 +523,6 @@ def scrape_category(driver, category_name, category_url, store_name):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def get_chrome_major_version():
-    """Detect the installed Chrome major version number."""
-    try:
-        output = subprocess.check_output(
-            ["google-chrome", "--version"], text=True
-        ).strip()
-        m = re.search(r"(\d+)\.", output)
-        return int(m.group(1)) if m else None
-    except Exception:
-        return None
-
-
 def main():
     #print(driver.capabilities['browserVersion'])
     # Create the table once before any scraping starts.
@@ -543,27 +531,13 @@ def main():
 
     # undetected_chromedriver bypasses Cloudflare bot detection.
     # Do NOT use headless — it gets detected and blocked.
-    # Auto-detect Chrome version so it works across environments.
-    chrome_version = get_chrome_major_version()
+    # Update version_main if your Chrome version changes (check chrome://version).
     options = uc.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    # Give this scraper its own chromedriver copy to avoid conflicts
-    import shutil, tempfile
-    system_chromedriver = shutil.which("chromedriver")
-    driver_path = None
-    if system_chromedriver:
-        tmp_dir = tempfile.mkdtemp(prefix="uc_saveon_")
-        driver_path = os.path.join(tmp_dir, "chromedriver")
-        shutil.copy2(system_chromedriver, driver_path)
-        os.chmod(driver_path, 0o755)
-    if driver_path:
-        driver = uc.Chrome(options=options, version_main=chrome_version,
-                           driver_executable_path=driver_path)
-    else:
-        driver = uc.Chrome(options=options, version_main=chrome_version)
+    driver  = uc.Chrome(options=options, version_main=146)
 
     try:
         for loc_index, (store_name, store_id) in enumerate(LOCATIONS, 1):

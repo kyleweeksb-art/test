@@ -12,6 +12,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
+
+
 # ── Store locations ────────────────────────────────────────────────────────────
 LOCATIONS = [
     "crowfoot",
@@ -70,6 +72,26 @@ def or_none(value):
     if value == "" or value is None:
         return None
     return value
+
+
+def strip_unit_prices(text):
+    """Remove unit prices, earn/save text, and other non-shelf-price dollar amounts."""
+    text = re.sub(
+        r"\(\s*\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)\s*\)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s+per\s+[\d.]+\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\$[\d.]+\s*/\s*[\d.]*\s*(?:g|mg|ml|kg|l|oz|lb|lbs|ea|each|unit|ct|count)",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:earn|save|bonus|reward|scene\+?|redeem|off)[^$]*\$[\d.]+",
+        "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:approx\.?|approximately)\s+\$[\d.]+\s*/\s*(?:kg|lb|lbs)",
+        "", text, flags=re.IGNORECASE)
+    return text
 
 
 def setup_database():
@@ -291,13 +313,16 @@ def parse_products(html, category_name, location):
             continue
 
         price = None
-        MIN_PLAUSIBLE_PRICE = 0.25
-        MAX_PLAUSIBLE_PRICE = 150.0
+        MIN_PLAUSIBLE_PRICE = 0.50
+        MAX_PLAUSIBLE_PRICE = 200.0
         for el in container.select('[class*="price"]'):
-            m = re.match(r"^\$\s*(\d+\.?\d*)", el.get_text(strip=True))
+            el_text = el.get_text(strip=True)
+            # Skip elements that look like unit prices (contain /kg, /lb, /100g, /ea, per)
+            if re.search(r'/\s*(?:\d*\s*)?(?:kg|g|lb|lbs|ml|l|oz|ea|each|unit|ct)\b|per\s+\d', el_text, re.I):
+                continue
+            m = re.match(r"^\$\s*(\d+\.\d{2})", el_text)
             if m:
                 candidate = float(m.group(1))
-                # Skip per-unit prices (e.g. $0.54/100g) and points phantom values
                 if MIN_PLAUSIBLE_PRICE <= candidate <= MAX_PLAUSIBLE_PRICE:
                     price = candidate
                     break
