@@ -2,6 +2,7 @@ import re
 import time
 import uuid
 import hashlib
+import subprocess
 import mysql.connector
 from db_connection import get_db_connection
 from mysql.connector import Error
@@ -532,6 +533,20 @@ def extract_price(text):
     return None
 
 
+
+def safe_str(tag):
+    """Convert a BS4 tag to string safely across BS4 versions."""
+    if tag is None:
+        return ""
+    try:
+        return str(tag)
+    except (TypeError, AttributeError):
+        try:
+            return tag.decode()
+        except Exception:
+            return tag.get_text() if hasattr(tag, 'get_text') else ""
+
+
 # ── Browser helpers ────────────────────────────────────────────────────────────
 
 def dismiss_popups(driver):
@@ -822,7 +837,7 @@ def parse_products(html, image_map, category_name, store_name, postal_code):
     Uses a pre-collected image_map {product_code: url} from the live JS DOM.
     Names are cleaned via clean_name() to separate brand from product name.
     """
-    soup  = BeautifulSoup(html, "html.parser")
+    soup  = BeautifulSoup(html, "lxml")
     links = soup.find_all("a", href=re.compile(r"/p/\d+", re.I))
 
     products = []
@@ -907,17 +922,19 @@ def parse_products(html, image_map, category_name, store_name, postal_code):
             price = None
 
         # ── Stock status ───────────────────────────────────────────────────────
-        card_html = str(card)
+        card_html = safe_str(card)
         in_stock = not bool(re.search(
             r'out.of.stock|unavailable|not available|sold.out|'
             r'class="[^"]*out-of-stock|class="[^"]*unavailable',
             card_html, re.IGNORECASE
         ))
-        # Also treat "Add to Cart" button being disabled as out of stock
         if in_stock:
-            add_btn = card.find(attrs={"aria-label": re.compile(r"add.*cart", re.I)})
-            if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
-                in_stock = False
+            try:
+                add_btn = card.find(attrs={"aria-label": re.compile(r"add.*cart", re.I)})
+                if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
+                    in_stock = False
+            except (AttributeError, TypeError):
+                pass
 
         # ── Site unit price string ─────────────────────────────────────────────
         site_unit_price = ""
@@ -1007,16 +1024,29 @@ def scrape_category(driver, category_name, category_url, store_name, postal_code
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def get_chrome_major_version():
+    """Detect the installed Chrome major version number."""
+    try:
+        output = subprocess.check_output(
+            ["google-chrome", "--version"], text=True
+        ).strip()
+        m = re.search(r"(\d+)\.", output)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
 def main():
     setup_database()
 
+    chrome_version = get_chrome_major_version()
     options = uc.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,900")
-    driver = uc.Chrome(options=options, version_main=146)
+    driver = uc.Chrome(options=options, version_main=chrome_version)
 
     try:
         for loc_index, (store_name, postal_code) in enumerate(LOCATIONS, 1):
