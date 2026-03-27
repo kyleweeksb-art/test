@@ -550,7 +550,14 @@ def main():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    driver  = uc.Chrome(options=options, version_main=chrome_version)
+    # Use system chromedriver if available to skip the patcher download
+    import shutil
+    system_chromedriver = shutil.which("chromedriver")
+    if system_chromedriver:
+        driver = uc.Chrome(options=options, version_main=chrome_version,
+                           driver_executable_path=system_chromedriver)
+    else:
+        driver = uc.Chrome(options=options, version_main=chrome_version)
 
     try:
         for loc_index, (store_name, store_id) in enumerate(LOCATIONS, 1):
