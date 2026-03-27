@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 import hashlib
+import subprocess
 import mysql.connector
 from db_connection import get_db_connection
 from mysql.connector import Error
@@ -122,6 +123,19 @@ def or_none(value):
     if value == "" or value is None:
         return None
     return value
+
+
+def safe_str(tag):
+    """Convert a BS4 tag to string safely across BS4 versions."""
+    if tag is None:
+        return ""
+    try:
+        return str(tag)
+    except (TypeError, AttributeError):
+        try:
+            return tag.decode()
+        except Exception:
+            return tag.get_text() if hasattr(tag, 'get_text') else ""
 
 
 def setup_database():
@@ -348,7 +362,7 @@ def wait_for_cards(driver, timeout=20):
 # ── Scraping logic ─────────────────────────────────────────────────────────────
 
 def parse_products(html, category_name, store_name):
-    soup  = BeautifulSoup(html, "html.parser")
+    soup  = BeautifulSoup(html, "lxml")
     cards = soup.find_all("article", attrs={"data-testid": re.compile(r"^ProductCardWrapper-")})
     products = []
 
@@ -413,7 +427,7 @@ def parse_products(html, category_name, store_name):
                         pass
 
         # ── Stock status ───────────────────────────────────────────────────────
-        card_html = str(card)
+        card_html = safe_str(card)
         in_stock = not bool(re.search(
             r'out.of.stock|unavailable|not available|sold.out|'
             r'OutOfStock|SoldOut|'
@@ -422,9 +436,12 @@ def parse_products(html, category_name, store_name):
         ))
         if in_stock:
             # Save-On-Foods uses a specific testid for the add-to-cart button
-            add_btn = card.find(attrs={"data-testid": re.compile(r"addToCart|add-to-cart", re.I)})
-            if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
-                in_stock = False
+            try:
+                add_btn = card.find(attrs={"data-testid": re.compile(r"addToCart|add-to-cart", re.I)})
+                if add_btn and (add_btn.get("disabled") or add_btn.get("aria-disabled") == "true"):
+                    in_stock = False
+            except (AttributeError, TypeError):
+                pass
 
         # Search the image wrapper first; fall back to the whole card.
         # Sale cards inject badge elements that can shift the wrapper's DOM.
@@ -506,6 +523,18 @@ def scrape_category(driver, category_name, category_url, store_name):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def get_chrome_major_version():
+    """Detect the installed Chrome major version number."""
+    try:
+        output = subprocess.check_output(
+            ["google-chrome", "--version"], text=True
+        ).strip()
+        m = re.search(r"(\d+)\.", output)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
 def main():
     #print(driver.capabilities['browserVersion'])
     # Create the table once before any scraping starts.
@@ -514,13 +543,14 @@ def main():
 
     # undetected_chromedriver bypasses Cloudflare bot detection.
     # Do NOT use headless — it gets detected and blocked.
-    # Update version_main if your Chrome version changes (check chrome://version).
+    # Auto-detect Chrome version so it works across environments.
+    chrome_version = get_chrome_major_version()
     options = uc.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    driver  = uc.Chrome(options=options, version_main=146)
+    driver  = uc.Chrome(options=options, version_main=chrome_version)
 
     try:
         for loc_index, (store_name, store_id) in enumerate(LOCATIONS, 1):
